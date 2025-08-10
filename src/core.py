@@ -1,42 +1,44 @@
+
+import math
 import time
+import requests
+import numpy as np
 
-from typing import List, Optional, Tuple
-from uiautomator2 import Device, UiObject
-from collections import namedtuple
+from io import BytesIO
+from pathlib import Path
+from PIL import Image, ImageChops
 from dataclasses import dataclass
-from bs4 import BeautifulSoup
+from PIL.Image import Image as PILImage
+from typing import List, Tuple, Optional
+from urllib.parse import parse_qs, urlparse
+from uiautomator2 import Device, UiObject, UiObjectNotFoundError
 
-from src.ocr import Tesseract
-from src.common import (
-    AdNodesSelectors, 
-    MainNodesSelectors, 
-    ClassNodesSelectors, 
-    ChromeNodesSelectors,
-    PlayerNodesSelectors,
-    ContentNodesSelectors,
-    AdvertiserNodesSelectors,
+from src.node_selectors import AdNodesSelectors, ClassNodesSelectors
+from src.nodes import (
+    AdNodes, 
+    MainNodes, 
+    ClassNodes, 
+    PlayerNodes, 
+    ChromeNodes, 
+    ContentNodes
 )
 
 
-Coords = namedtuple("Coords", ["bounds", "center"])
-
-
 @dataclass
-class AdBlockBounds:
-    image: Coords
-    text: Coords
-    icon: Coords
-    options: Coords
-    button: Coords
+class Coords:
+    center: Tuple[int, int]
+    bounds: Tuple[int, int, int, int]
     
     
 @dataclass
-class AdvertiserInfo:
-    name: str
-    location: str
+class AdInfo:
+    url: str
+    image: PILImage
 
 
 class YoutubeApp:
+    package_name: str = "com.google.android.youtube"
+    
     def __init__(self, device: Device) -> None:
         self.device = device
 
@@ -48,128 +50,162 @@ class YoutubeApp:
 
     def open_link(self, link: str) -> None:
         self.device.shell(f'am start -a android.intent.action.VIEW -d "{link}"')
+        
 
-
-class YoutubeAdParser:
-    package_name: str = "com.google.android.youtube"
+class MobileSettings:
+    def __init__(self, device: Device) -> None:
+        self._device = device
+        
+    def notification_enable(self) -> None:
+        self._device.shell(["cmd", "notification", "set_dnd", "off"])
     
-    def __init__(self, device: Device, lang: str = "eng") -> None:
+    def notification_disable(self) -> None:
+        self._device.shell(["cmd", "notifiaction", "set_dnd", "on"])
+        
+    def change_rotation(self) -> None:
+        self._device.shell(["settings", "put", "system", "user_rotation", "0"])
+
+
+class YoutubeParser:
+    def __init__(self, device: Device) -> None:
         self.device = device
-        self.lang = lang
         
-        self.offset: int = 25
-        self.time_sleep = 0.25
-        self.ad_wait_time = 5
-        self.wait_load_time_sleep = 1
-        self.up_swipe_duration = 0.3
-        self.easy_swipe_duration = 0.5
-        self.down_swipe_duration = 0.35
+        self.offset = 25
+        self.max_swipe_count = 9
         
-        # ===== Main Nodes =====
-        self.main_node = self.device(**MainNodesSelectors.main_node)
-        self.time_bar_node = self.main_node.child(**MainNodesSelectors.time_bar_node)
-        self.video_player_node = self.main_node.child(**MainNodesSelectors.video_player_node)
-        self.video_metadata_node = self.main_node.child(**MainNodesSelectors.video_metadata_node)
-        self.engagement_panel_node = self.main_node.child(**MainNodesSelectors.engagement_panel_node)
-
-        # ===== Player Nodes =====
-        self.player_control_button = self.video_player_node.child(**PlayerNodesSelectors.control_button)
-
-        # ===== Content Node =====
-        self.content_watch_list_node = self.video_metadata_node.child(**ContentNodesSelectors.watch_list_node)
-        self.content_relative_container_node = self.video_metadata_node.child(**ContentNodesSelectors.relative_container_node)
-        self.content_ad_block_node = self.video_metadata_node.child(**ContentNodesSelectors.ad_block_node)
-
-        # ===== Ad Nodes =====
-        self.ad_drag_handle_button = self.engagement_panel_node.child(**AdNodesSelectors.drag_handle_button)
-        self.ad_header_panel_node = self.engagement_panel_node.child(**AdNodesSelectors.header_panel_node)
-        self.ad_close_button = self.engagement_panel_node.child(**AdNodesSelectors.close_ad_button)
-
-        # ===== Class Nodes =====
-        self.relative_layouts = self.video_metadata_node.child(**ClassNodesSelectors.relative_layout)
-
-        # ===== Advertiser Nodes ===== 
-        self.advertiser_content_node = self.device(**AdvertiserNodesSelectors.content_node)
-        self.advertiser_progress_bar_node = self.advertiser_content_node.child(**AdvertiserNodesSelectors.progress_bar_node)
-        self.advertiser_node = self.advertiser_content_node.child(**AdvertiserNodesSelectors.advertiser_node)
-        self.advertiser_button = self.advertiser_node.child(**AdvertiserNodesSelectors.advertiser_button)
+        self.ad_wait_timeout = 5
+        self.action_timeout = 0.25
+        self.video_load_timeout = 1
+        self.player_hide_timeout = 5
+        self.node_spawn_timeout = 2.5
         
-        # ===== Chrome Nodes =====
-        self.chrome_tool_bar_node = self.device(**ChromeNodesSelectors.toolbar_node)
-        self.chrome_menu_button = self.chrome_tool_bar_node.child(**ChromeNodesSelectors.menu_button)
-        self.chrome_app_menu_list = self.device(**ChromeNodesSelectors.app_menu_list_node)
-        self.chrome_page_info_button = self.chrome_app_menu_list.child(**ChromeNodesSelectors.page_info_button)
-        self.chrome_page_info_url_text = self.device(**ChromeNodesSelectors.page_info_url_text)
-        self.truncated_url_button = self.device(**ChromeNodesSelectors.truncated_url_button)
-
-        self.app = YoutubeApp(device=device)
+        self.telegram_chat_id = None
+        self.telegram_bot_api = None
         
-        self._dns_disable()
-        self._change_rotation()
-        self._notification_disable()
+        self.hidden_ad_duration = 0.1
+        self.next_content_swipe_duration = 0.5
+        self.half_content_swipe_duration = 0.5
+        self.reposition_content_swipe_duration = 0.5
+        
+        self.app = YoutubeApp(device=self.device)
+        self.mobile = MobileSettings(device=self.device)
+        
+        self._init_nodes()
+        self.mobile.notification_disable()
+
+    def _init_nodes(self) -> None:
+        self.ad_nodes = AdNodes(device=self.device)
+        self.main_nodes = MainNodes(device=self.device)
+        self.class_nodes = ClassNodes(device=self.device)
+        self.chrome_nodes = ChromeNodes(device=self.device)
+        self.player_nodes = PlayerNodes(device=self.device)
+        self.content_nodes = ContentNodes(device=self.device)
+        
+    @staticmethod
+    def combine_images_vertically(
+        top_img: PILImage, 
+        bottom_img: PILImage,
+        output_path: str = None,
+        background_color: tuple = (255, 255, 255)
+    ) -> Optional[PILImage]:
+        width = max(top_img.width, bottom_img.width)
+        height = top_img.height + bottom_img.height
+        
+        combined = Image.new("RGB", (width, height), background_color)
+        
+        x_offset = (width - top_img.width) // 2
+        combined.paste(top_img, (x_offset, 0))
+        
+        x_offset = (width - bottom_img.width) // 2
+        combined.paste(bottom_img, (x_offset, top_img.height))
+        
+        if output_path:
+            combined.save(output_path)
+            return None
+        return combined
+    
+    @staticmethod
+    def compare_images(image1: PILImage, image2: PILImage, tolerance: int = 5) -> float:
+        if image1.size != image2.size or image1.mode != image2.mode:
+            width = min(image1.width, image2.width)
+            height = min(image1.height, image2.height)
+            image1 = image1.resize((width, height))
+            image2 = image2.resize((width, height))
+            
+        if image1.mode != 'RGB':
+            image1 = image1.convert('RGB')
+        if image2.mode != 'RGB':
+            image2 = image2.convert('RGB')
+        
+        diff = ImageChops.difference(image1, image2)
+        
+        diff_array = np.array(diff)
+        
+        similar_pixels = np.sum(np.all(diff_array <= tolerance, axis=2))
+        total_pixels = diff_array.shape[0] * diff_array.shape[1]
+        
+        similarity_percent = (similar_pixels / total_pixels) * 100
+        
+        return round(similarity_percent, 2)
 
     def wait_load_video(self, max_attempts: int = 10) -> bool:
         for attempt in range(1, max_attempts + 1):
-            if self.relative_layouts.count == 0:
+            if self.class_nodes.relative_layouts.count == 0:
+                time.sleep(self.video_load_timeout)
                 return True
             
             if attempt < max_attempts:
-                time.sleep(self.wait_load_time_sleep)
-                
+                time.sleep(self.video_load_timeout)
+        
         return False
-    
-    def is_stopped_video(self) -> bool:
-        if not self.player_control_button.exists:
-            self.video_player_node.click()
-        try:
-            desc = self.player_control_button.info["contentDescription"]
-        except:
-            return False
-        if desc == "Pause video":
-            return False
-        return True
         
     def stop_video(self) -> bool:
-        self.video_player_node.click()
-        self.player_control_button.click_exists(0.25)
-        time.sleep(self.time_sleep)
-        return self.is_stopped_video()
-    
-    def is_closed_ad(self) -> bool:
-        if not self.ad_header_panel_node.exists:
-            return True
-        return False
-    
-    def _handle_drag_handle_case(self) -> bool:
-        buttons = self.ad_header_panel_node.child(**ClassNodesSelectors.button)
-        if buttons.count > 0:
-            if buttons[-1].click_exists(timeout=1):
-                time.sleep(self.time_sleep)
+        try:
+            if self.player_nodes.control_button.exists:
+                if self.player_nodes.control_button.info["contentDescription"] == "Play video":
+                    return True
+                self.player_nodes.control_button.wait_gone(timeout=self.player_hide_timeout)
+                time.sleep(self.action_timeout)
+                
+            self.main_nodes.video_player_node.click()
+            if self.player_nodes.control_button.wait(timeout=self.action_timeout):
+                self.player_nodes.control_button.click()
                 return True
-            
-        drag_coords = self.ad_drag_handle_button.bounds()
-        main_node_coords = self.main_node.bounds()
-        center_x = (drag_coords[2] + drag_coords[0]) // 2
+        
+            return False
+        except UiObjectNotFoundError as e:
+            print(f"[ERROR] [{self.device.serial}] {e}")
+            return False
+        
+    def _handle_drag_handle_case(self) -> bool:
+        drag_button_coords = Coords(
+            bounds=self.ad_nodes.drag_handle_button.bounds(), 
+            center=self.ad_nodes.drag_handle_button.center()
+        )
+        main_node_coords = Coords(
+            bounds=self.main_nodes.main_node.bounds(), 
+            center=self.main_nodes.main_node.center()
+        )
         self.device.swipe_points(
             points=[
-                (center_x, drag_coords[3] + self.offset),
-                (center_x, main_node_coords[3] - self.offset)
+                (drag_button_coords.center[0], drag_button_coords.bounds[3] + self.offset),
+                (drag_button_coords.center[0], main_node_coords.bounds[3] - self.offset)
             ],
-            duration=self.down_swipe_duration
+            duration=self.hidden_ad_duration
         )
-        time.sleep(self.time_sleep)
+        time.sleep(self.action_timeout)
         
-        return not self.ad_drag_handle_button.exists
+        return not self.ad_nodes.drag_handle_button.exists
     
     def _handle_close_button_case(self) -> bool:
-        button = self.ad_header_panel_node.child(**AdNodesSelectors.close_ad_button)
+        button = self.ad_nodes.header_panel_node.child(**AdNodesSelectors.close_ad_button)
         if button.exists and button.click_exists(timeout=1):
-            time.sleep(self.time_sleep)
+            time.sleep(self.action_timeout)
             return not button.exists
-        
-        buttons = self.ad_header_panel_node.child(**ClassNodesSelectors.image_view)
+
+        buttons = self.ad_nodes.header_panel_node.child(**ClassNodesSelectors.image_view)
         if buttons.count > 0 and buttons[-1].click_exists(timeout=1):
-            time.sleep(self.time_sleep)
+            time.sleep(self.action_timeout)
             try:
                 return not buttons[-1].exists
             except:
@@ -178,304 +214,340 @@ class YoutubeAdParser:
         return False
     
     def _handle_close_ad(self) -> bool:
-        if not self.ad_header_panel_node.exists:
+        if not self.ad_nodes.header_panel_node.exists:
             return False
-        
-        if self.ad_drag_handle_button.exists:
+
+        if self.ad_nodes.drag_handle_button.exists:
             return self._handle_drag_handle_case()
         
         return self._handle_close_button_case()
-
-    def preparing_app(self) -> bool:
+    
+    def preparing_video(self) -> bool:
         if not self._handle_close_ad():
-            time.sleep(self.ad_wait_time)
+            time.sleep(self.ad_wait_timeout)
         
         if not self._handle_close_ad():
-            if self.ad_header_panel_node.exists:
+            if self.ad_nodes.header_panel_node.exists:
                 return False
         return True
-
-    def _get_swipe_coords(self) -> Tuple[int, int, int, int]:
-        watch_list_coords = self.content_watch_list_node.bounds()
-        if self.content_relative_container_node.exists:
-            content_relative_container_coords = self.content_relative_container_node.bounds()
-            return (
-                content_relative_container_coords[0], content_relative_container_coords[3],
-                watch_list_coords[2], watch_list_coords[3],
-            )
-        return watch_list_coords
     
-    def swipe(self) -> None:
-        coords = self._get_swipe_coords()
-
-        center_x = (coords[2] + coords[0]) // 2
-        self.device.swipe_points(
-            points=[
-                (center_x, coords[3] - self.offset),
-                (center_x, coords[1] + self.offset)
-            ],
-            duration=self.up_swipe_duration
+    def _get_content_block_coords(self) -> Coords:
+        watch_list_node_coords = Coords(
+            bounds=self.content_nodes.watch_list_node.bounds(), 
+            center=self.content_nodes.watch_list_node.center()
         )
-
-    def easy_swipe(self) -> None:
-        coords = self._get_swipe_coords()
-
-        center_x = (coords[2] + coords[0]) // 2
-        distance = (coords[3] - coords[1]) // 2
+        if self.content_nodes.relative_container_node.exists:
+            relative_container_coords = Coords(
+                bounds=self.content_nodes.relative_container_node.bounds(), 
+                center=self.content_nodes.relative_container_node.center()
+            )
+            return Coords(
+                bounds=(
+                    relative_container_coords.bounds[0], relative_container_coords.bounds[3],
+                    watch_list_node_coords.bounds[2], watch_list_node_coords.bounds[3]
+                ),
+                center=(
+                    relative_container_coords.center[0],
+                    (watch_list_node_coords.center[1] + relative_container_coords.center[1]) // 2
+                )
+            )
+        return watch_list_node_coords
+        
+    def swipe_to_next_content(self) -> None:
+        coords = self._get_content_block_coords()
         
         self.device.swipe_points(
             points=[
-                (center_x, coords[3] - self.offset),
-                (center_x, coords[3] - self.offset - distance),
+                (coords.center[0], coords.bounds[3] - self.offset),
+                (coords.center[0], coords.bounds[1] + self.offset)
             ],
-            duration=self.easy_swipe_duration
+            duration=self.next_content_swipe_duration
         )
         
-    def _get_children_blocks(self, block: UiObject) -> List[Optional[UiObject]]:
+    def swipe_half_content(self) -> None:
+        coords = self._get_content_block_coords()
+        distance = (coords.bounds[3] - coords.bounds[1]) // 2
+        
+        self.device.swipe_points(
+            points=[
+                (coords.center[0], coords.bounds[3] - self.offset),
+                (coords.center[0], coords.bounds[3] - self.offset - distance)
+            ],
+            duration=self.half_content_swipe_duration
+        )
+        
+    def reposition_content(self, first_point: int, second_point: int) -> None:
+        coords = self._get_content_block_coords()
+
+        self.device.swipe_points(
+            points=[
+                (coords.center[0], first_point),
+                (coords.center[0], second_point)
+            ],
+            duration=self.reposition_content_swipe_duration
+        )
+
+    def _get_children_nodes(self, node: UiObject) -> List[Optional[UiObject]]:
         childrens = []
 
-        for child_index in range(block.info["childCount"]):
-            childrens.append(block.child(index=child_index)[0])
+        for child_index in range(node.info["childCount"]):
+            childrens.append(node.child(index=child_index)[0])
             
         return childrens
     
-    def get_ad_text(self, coords: Coords) -> str:
-        image = self.device.screenshot().crop(box=coords.bounds)
-        data = Tesseract.get_screen_data(image=image, lang=self.lang)
-        text = " ".join(data.text).strip()
+    def get_node_screenshot(self, left: int, top: int, right: int, bottom: int) -> PILImage:
+        coords = self._get_content_block_coords()
         
-        return text
-    
-    def get_advertiser_info(self, coords: Coords) -> AdvertiserInfo:
-        self.device.click(*coords.center)
-        
-        self.advertiser_progress_bar_node.wait(timeout=500)
-        self.advertiser_progress_bar_node.wait_gone(timeout=500)
-        
-        content_center = self.advertiser_content_node.center()
-        content_coords = self.advertiser_content_node.bounds()
-        self.device.swipe_points(
-            points=[
-                (content_center[0], content_coords[3] - (self.offset * 3)),
-                (content_center[0], content_coords[1] + (self.offset * 3))
-            ],
-            duration=0.1
+        if coords.bounds[1] >= top:
+            return self.device.screenshot().crop(
+                box=(left, coords.bounds[1], right, bottom)
+            )
+        return self.device.screenshot().crop(
+            box=(left, top, right, bottom)
         )
-        time.sleep(self.time_sleep)
-        
-        self.advertiser_button.click()
-        self.advertiser_button.click()
-        
-        self.advertiser_node.wait(timeout=5)
-        
-        text_view_count = self.advertiser_node.child(**ClassNodesSelectors.text_view)
-        if text_view_count.count == 0:
-            advertiser_node_child = self.advertiser_node.child(**ClassNodesSelectors.view)
-            advertiser_name = advertiser_node_child[5].info["text"]
-            advertiser_location = advertiser_node_child[7].info["text"]
-        else:
-            advertiser_node_child = self.advertiser_node.child(**ClassNodesSelectors.text_view)
-            advertiser_name = advertiser_node_child[2].info["text"]
-            advertiser_location = advertiser_node_child[4].info["text"]
 
-        self.device.press("back")
-        return AdvertiserInfo(
-            name=advertiser_name,
-            location=advertiser_location
-        )
+    # def get_ad_url(self, point: Tuple[int, int]) -> str:
+    #     self.device.click(*point)
+    #     time.sleep(self.ad_wait_timeout)
+        
+    #     self.chrome_nodes.menu_button.click(timeout=self.node_spawn_timeout)
+    #     self.chrome_nodes.page_info_button.click(timeout=self.node_spawn_timeout)
+    #     self.chrome_nodes.truncated_url_button.click(timeout=self.node_spawn_timeout)
+        
+    #     url = self.chrome_nodes.page_info_url_text.get_text(timeout=self.node_spawn_timeout)
+        
+    #     self.device.press("back")
+    #     time.sleep(self.action_timeout)
+    #     self.device.press("back")
+    #     time.sleep(self.action_timeout)
+        
+    #     return url
     
-    def _notification_enable(self) -> None:
-        self.device.shell(["cmd", "notification", "set_dnd", "off"])
-    
-    def _notification_disable(self) -> None:
-        self.device.shell(["cmd", "notifiaction", "set_dnd", "on"])
+    def get_ad_url(self, point: Tuple[int, int]) -> str:
+        self.device.click(*point)
+        time.sleep(self.action_timeout)
         
-    def _dns_disable(self) -> None:
-        self.device.shell(["settings", "put", "global", "private_dns_mode", "off"])
+        self.chrome_nodes.action_button.click(timeout=self.node_spawn_timeout)
+        time.sleep(self.action_timeout)
         
-    def _restart_network_services(self) -> None:
-        self.device.shell("svc wifi disable && svc wifi enable")
-        self.device.shell("svc data disable && svc data enable")
-        time.sleep(1.5)
-        
-    def _dns_enable(self) -> None:
-        self._dns_disable()
-        self.device.shell(["settings", "put", "global", "private_dns_specifier", "fake.dns.server"])
-        self.device.shell(["settings", "put", "global", "private_dns_mode", "hostname"])
-        # self._restart_network_services()
-        
-    def _change_rotation(self) -> None:
-        self.device.shell(["settings", "put", "system", "user_rotation", "0"])
-        
-    def get_ad_url(self, coords: Coords) -> str:
-        self._dns_enable()
-        self.device.click(*coords.center)
-
-        self.chrome_menu_button.click(timeout=2.5)    
-        self.chrome_page_info_button.click(timeout=2.5)
-        self.truncated_url_button.click(timeout=2.5)
-        
-        url = self.chrome_page_info_url_text.get_text(timeout=2.5)
-        self._dns_disable()
+        url = self.chrome_nodes.content_preview_text.get_text(timeout=self.node_spawn_timeout)
         
         self.device.press("back")
-        time.sleep(self.time_sleep)
+        time.sleep(self.action_timeout)
         self.device.press("back")
-        time.sleep(self.time_sleep)
+        time.sleep(self.action_timeout)
         
         return url
-    
-    def _get_ad_image_coords(self) -> Coords:
-        children = self._get_children_blocks(self.content_ad_block_node)
-        image = children[0]
         
-        if self.content_relative_container_node.exists:
-            image_coords = image.bounds()
-            relative_container_coords = self.content_relative_container_node.bounds()
-            bounds=(
-                image_coords[0], relative_container_coords[3],
-                image_coords[2], image_coords[3]
-            )
-            center=(
-                (image_coords[2] + image_coords[0]) // 2,
-                (image_coords[3] + relative_container_coords[3]) // 2
-            )
-        else:
-            bounds = image.bounds()
-            center = image.center()
-            
-        return Coords(
-            bounds=bounds,
-            center=center,
+    def back_to_watch_list(self, max_attempts: int = 5) -> None:
+        for _ in range(max_attempts):
+            if self.content_nodes.watch_list_node.exists:
+                break
+            else:
+                self.device.press("back")
+                time.sleep(self.video_load_timeout)
+
+    def parse_ad(self) -> AdInfo:
+        ad_block_node_children = self._get_children_nodes(node=self.content_nodes.ad_block_node)
+        ad_block_node_coords = self.content_nodes.ad_block_node.bounds()
+        ad_text = self.get_node_screenshot(
+            left=ad_block_node_coords[0], top=ad_block_node_children[0].bounds()[3],
+            right=ad_block_node_coords[2], bottom=ad_block_node_coords[3]
         )
-
-    def get_ad_coords(self) -> AdBlockBounds:
-        children = self._get_children_blocks(self.content_ad_block_node)
         
-        view_group_count = self.content_ad_block_node.child(**ClassNodesSelectors.view_group).count
-        image_view_count = self.content_ad_block_node.child(**ClassNodesSelectors.image_view).count
+        view_count = self.content_nodes.ad_block_node.child(**ClassNodesSelectors.view_group).count
+        image_count = self.content_nodes.ad_block_node.child(**ClassNodesSelectors.image_view).count
         
-        match (view_group_count, image_view_count):
-            case (4, 2) | (4, 4): # (3, 4)
-                image_coords = Coords(bounds=children[0].bounds(), center=children[0].center())
-                icon_coords = Coords(bounds=children[1].bounds(), center=children[0].center())
-                options_coords = Coords(bounds=children[2].bounds(), center=children[0].center())
-                button_coords = Coords(bounds=children[3].bounds(), center=children[3].center())
-                text_coords = Coords(
-                    bounds=(
-                        icon_coords.bounds[2], image_coords.bounds[3],
-                        options_coords.bounds[0], button_coords.bounds[1]
-                    ),
-                    center=(
-                        (options_coords.bounds[0] + icon_coords.bounds[2]) // 2,
-                        (button_coords.bounds[1] + image_coords.bounds[3]) // 2
-                    )
-                )
-
-            case (7, 3) | (7, 4):
-                icon, options = children[2].child()
-                button = children[3].child(**ClassNodesSelectors.view_group)[-1]
-                
-                image_coords = Coords(bounds=children[0].bounds(), center=children[0].center())
-                icon_coords = Coords(bounds=icon.bounds(), center=icon.center())
-                options_coords = Coords(bounds=options.bounds(), center=options.center())
-                button_coords = Coords(bounds=button.bounds(), center=button.center())
-                text_coords = Coords(
-                    bounds=(
-                        icon_coords.bounds[2], image_coords.bounds[3],
-                        options_coords.bounds[0], button_coords.bounds[1]
-                    ),
-                    center=(
-                        (options_coords.bounds[0] + icon_coords.bounds[2]) // 2,
-                        (button_coords.bounds[1] + image_coords.bounds[3]) // 2
-                    )
-                )
-            
-            case (8, 3) | (8, 4):
-                second_node_childs = children[1].child()
-                button = children[2].child(**ClassNodesSelectors.view_group)[-1]
-                
-                image_coords = Coords(bounds=children[0].bounds(), center=children[0].center())
-                icon_coords = Coords(bounds=second_node_childs[0].bounds(), center=second_node_childs[0].center())
-                options_coords = Coords(bounds=second_node_childs[3].bounds(), center=second_node_childs[3].center())
-                button_coords = Coords(bounds=button.bounds(), center=button.center())
-                text_coords = Coords(
-                    bounds=(
-                        icon_coords.bounds[2], image_coords.bounds[3],
-                        options_coords.bounds[0], button_coords.bounds[1]
-                    ),
-                    center=(
-                        (options_coords.bounds[0] + icon_coords.bounds[2]) // 2,
-                        (button_coords.bounds[1] + image_coords.bounds[3]) // 2
-                    )
-                )
+        print(f"[INFO] [{self.device.serial}] {view_count=} | {image_count=}")
         
-            case (13, 6) | (13, 5):
-                second_node_childs = children[2].child()
-                
-                image_coords = Coords(bounds=children[0].bounds(), center=children[0].center())
-                icon_coords = Coords(bounds=second_node_childs[0].bounds(), center=second_node_childs[0].center())
-                options_coords = Coords(bounds=second_node_childs[2].bounds(), center=second_node_childs[2].center())
-                button_coords = image_coords
-                text_coords = Coords(
-                    bounds=(
-                        icon_coords.bounds[2], image_coords.bounds[3],
-                        options_coords.bounds[0], self.content_ad_block_node[3]
-                    ),
-                    center=(
-                        (options_coords.bounds[0] + icon_coords.bounds[2]) // 2,
-                        (self.content_ad_block_node[3] + image_coords.bounds[3]) // 2
-                    )
-                )
-
-            case (15, 6) | (15, 5):
-                second_node_childs = children[2].child()
-                button = children[3].child(**ClassNodesSelectors.view_group)[-1]
-                
-                image_coords = Coords(bounds=children[0].bounds(), center=children[0].center())
-                icon_coords = Coords(bounds=second_node_childs[0].bounds(), center=second_node_childs[0].center())
-                options_coords = Coords(bounds=second_node_childs[2].bounds(), center=second_node_childs[2].center())
-                button_coords = Coords(bounds=button.bounds(), center=button.center())
-                text_coords = Coords(
-                    bounds=(
-                        icon_coords.bounds[2], image_coords.bounds[3],
-                        options_coords.bounds[0], button_coords.bounds[1]
-                    ),
-                    center=(
-                        (options_coords.bounds[0] + icon_coords.bounds[2]) // 2,
-                        (button_coords.bounds[1] + image_coords.bounds[3]) // 2
-                    )
-                )
-                
-            case (17, 8):
-                second_node_childs = children[2].child()
-                button = children[4].child(**ClassNodesSelectors.view_group)[-1]
-                
-                image_coords = Coords(bounds=children[0].bounds(), center=children[0].center())
-                icon_coords = Coords(bounds=second_node_childs[0].bounds(), center=second_node_childs[0].center())
-                options_coords = Coords(bounds=second_node_childs[1].bounds(), center=second_node_childs[1].center())
-                button_coords = Coords(bounds=button.bounds(), center=button.center())
-                text_coords = Coords(
-                    bounds=(
-                        icon_coords.bounds[2], image_coords.bounds[3],
-                        options_coords.bounds[0], button_coords.bounds[1]
-                    ),
-                    center=(
-                        (options_coords.bounds[0] + icon_coords.bounds[2]) // 2,
-                        (button_coords.bounds[1] + image_coords.bounds[3]) // 2
-                    )
-                )
-        
+        match (view_count, image_count):
+            case (8, 4) | (7, 4) | (8, 3):
+                try:
+                    ad_url = self.get_ad_url(point=ad_block_node_children[0].center())
+                except Exception as e:
+                    print(f"[ERROR] [{self.device.serial}] {e}")
+                    self.back_to_watch_list()
+                    return None
+            case (v, i) if (v <= 2 and i <= 3): 
+                return None
+            case (8, 5):
+                return None
             case _:
-                raise Exception("Что-то новое")
+                self.send_telegram_message()
+                return None
+                
+        ad_block_node_children = self._get_children_nodes(node=self.content_nodes.ad_block_node)
+        ad_image_block_coords = ad_block_node_children[0].bounds()
+        ad_image = self.get_node_screenshot(*ad_image_block_coords)
         
-        return AdBlockBounds(
-            image=image_coords,
-            icon=icon_coords,
-            options=options_coords,
-            button=button_coords,
-            text=text_coords
+        image = self.combine_images_vertically(top_img=ad_image, bottom_img=ad_text)
+        
+        return AdInfo(
+            url=ad_url,
+            image=image
         )
         
+    # Переделать
+    def save_ad_info(self, ad_info: AdInfo) -> None:
+        results_folder_path = Path("results")
+        phone_folder_path = results_folder_path.joinpath(self.device.serial)
         
+        unique_name = str(int(time.time()))
         
+        ad_folder_path = phone_folder_path.joinpath(unique_name)
+        ad_folder_path.mkdir(exist_ok=True, parents=True)
+        
+        info_path = ad_folder_path.joinpath("info.txt")
+        image_path = ad_folder_path.joinpath("image.png")
+        
+        with info_path.open('w') as file:
+            file.write(ad_info.url)
+            
+        ad_info.image.save(image_path)
+        
+    def send_telegram_message(self) -> None:
+        try:
+            ad_block_node_children = self._get_children_nodes(node=self.content_nodes.ad_block_node)
+            view_count = self.content_nodes.ad_block_node.child(**ClassNodesSelectors.view_group).count
+            image_count = self.content_nodes.ad_block_node.child(**ClassNodesSelectors.image_view).count
+            coords = self._get_content_block_coords()
+            image = self.device.screenshot().crop(box=coords.bounds)
+            dump = self.device.dump_hierarchy()
+
+            message_text = (
+                "📊 Анализ рекламного блока:\n"
+                f"• ViewGroup: {view_count}\n"
+                f"• ImageView: {image_count}\n\n"
+                "🔍 Дочерние элементы:\n"
+            )
+
+            for i, child in enumerate(ad_block_node_children, 1):
+                child_info = child.info if hasattr(child, 'info') else {}
+                message_text += (
+                    f"\n{i}. {child_info.get('className', 'N/A')}\n"
+                    f"   - childCount: {child_info.get('childCount', 0)}\n"
+                    f"   - contentDescription: {child_info.get('contentDescription', 'N/A')}\n"
+                    f"   - resourceName: {child_info.get('resourceName', 'N/A')}\n"
+                    f"   - text: {child_info.get('text', 'N/A')}\n"
+                )
+
+            img_byte_arr = BytesIO()
+            image.save(img_byte_arr, format='JPEG', quality=85)
+            screenshot_bytes = img_byte_arr.getvalue()
+
+            dump_bytes = dump.encode('utf-8')
+            if len(dump_bytes) > 50 * 1024 * 1024:  # 50MB лимит
+                dump_bytes = dump_bytes[:50 * 1024 * 1024]
+
+            requests.post(
+                f"https://api.telegram.org/bot{self.telegram_bot_api}/sendPhoto",
+                files={'photo': ('ad_screenshot.jpg', screenshot_bytes)},
+                data={'chat_id': self.telegram_chat_id, 'caption': message_text}
+            )
+
+            requests.post(
+                f"https://api.telegram.org/bot{self.telegram_bot_api}/sendDocument",
+                files={'document': ('ui_dump.xml', dump_bytes)},
+                data={'chat_id': self.telegram_chat_id}
+            )
+
+        except Exception as e:
+            print(f"Ошибка отправки: {str(e)}")
+        
+    def run(self, links: List[str]) -> None:
+        self.app.start()
+        print(f"[INFO] [{self.device.serial}] Программа запущена")
+        time.sleep(self.action_timeout)
+        
+        self.mobile.change_rotation()
+        print(f"[INFO] [{self.device.serial}] Изменено положение экрана")
+        time.sleep(self.action_timeout)
+        
+        print(f"[INFO] [{self.device.serial}] Начало работы с {len(links)} ссылками")
+        for link in links:
+            video_id = parse_qs(urlparse(link).query).get("v", [None])[0]
+            
+            self.app.open_link(link=link)
+            print(f"[INFO] [{self.device.serial}] Открытие ссылки {link.replace('\n', '')}")
+            time.sleep(self.action_timeout)
+            
+            is_video_loaded = self.wait_load_video()
+            time.sleep(self.action_timeout)
+            
+            if is_video_loaded:
+                watch_list_children = self.content_nodes.watch_list_node.child()
+                if self.content_nodes.watch_list_node.exists and watch_list_children.count == 0:
+                    print(f"[ERROR] [{self.device.serial}] [{video_id}] Не удалось загрузить видео")
+                    continue
+            print(f"[INFO] [{self.device.serial}] [{video_id}] Видео загружено")
+            
+            self.stop_video()
+            self.stop_video()       
+            is_video_stoped = self.stop_video()
+            if not is_video_stoped:
+                print(f"[ERROR] [{self.device.serial}] [{video_id}] Не получилось остановить видео")
+                links.append(link)
+                continue
+            print(f"[INFO] [{self.device.serial}] [{video_id}] Видео остановлено")
+            time.sleep(self.action_timeout)
+            
+            is_video_prepared = self.preparing_video()
+            if not is_video_prepared:
+                print(f"[ERROR] [{self.device.serial}] [{video_id}] Не удалось подготовить видео")
+                links.append(link)
+                continue
+            print(f"[INFO] [{self.device.serial}] [{video_id}] Видео успешно подготовлено")
+            time.sleep(self.action_timeout)
+            
+            swipe_count = 0   
+            while swipe_count != self.max_swipe_count:
+                first_screenshot = self.device.screenshot()
+                
+                if self.content_nodes.ad_block_node.exists:
+                    swipe_count = 0
+                    ad_block_coords = Coords(
+                        bounds=self.content_nodes.ad_block_node.bounds(),
+                        center=self.content_nodes.ad_block_node.center()
+                    )
+                    watch_list_coords = Coords(
+                        bounds=self.content_nodes.watch_list_node.bounds(),
+                        center=self.content_nodes.watch_list_node.center()
+                    )
+                    if ad_block_coords.bounds[3] == watch_list_coords.bounds[3]:
+                        self.swipe_half_content()
+                        continue
+                    else:
+                        self.reposition_content(
+                            first_point=ad_block_coords.bounds[3], 
+                            second_point=watch_list_coords.bounds[3]
+                        )
+                        time.sleep(self.action_timeout)
+                        
+                        result = self.parse_ad()
+                        if result:
+                            print(result)
+                            self.save_ad_info(ad_info=result)
+                        time.sleep(self.action_timeout)
+                        
+                        self.swipe_to_next_content()
+                        time.sleep(self.action_timeout)
+                        self.swipe_to_next_content()
+                        time.sleep(self.action_timeout)
+                        
+                        second_screenshot = self.device.screenshot()
+                        match_percentages = self.compare_images(first_screenshot, second_screenshot)
+                        if match_percentages >= 80:
+                            break
+                        
+                        swipe_count += 2
+                        continue
+                
+                self.swipe_to_next_content()
+                time.sleep(self.action_timeout)
+                
+                second_screenshot = self.device.screenshot()
+                match_percentages = self.compare_images(first_screenshot, second_screenshot)
+                if match_percentages >= 80:
+                    break
+                
+                swipe_count += 1

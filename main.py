@@ -1,165 +1,13 @@
 import argparse
 from multiprocessing import Process
-import os
 from pathlib import Path
 import subprocess
-import time
 from typing import List
+import requests
 from uiautomator2 import Device
 
-from src.core import YoutubeAdParser, AdvertiserInfo
-from src.common import ClassNodesSelectors
+from src.core import YoutubeParser
 
-from PIL import Image
-
-
-def save_ad(serial: str, text: str, advertiser_info: AdvertiserInfo, url: str, image_block: Image.Image, text_block: Image.Image):
-    result_path = Path("results")
-    result_path.mkdir(exist_ok=True, parents=True)
-    
-    serial_path = result_path.joinpath(serial)
-    serial_path.mkdir(exist_ok=True, parents=True)
-    
-    unique_name = str(int(time.time()))
-    folder_path = serial_path.joinpath(unique_name)
-    folder_path.mkdir(exist_ok=True, parents=True)
-    
-    data_file = folder_path.joinpath("info.txt")
-    data = f"Text: {text}\nAvertiser Name: {advertiser_info.name}\nAdvertiser Location: {advertiser_info.location}\nURL: {url}"
-    with data_file.open("w", encoding="UTF-8") as file:
-        file.write(data)
-    
-    image_file = folder_path.joinpath("image.png")
-    combine_images_vertically(image_block, text_block, output_path=image_file)
-
-
-def combine_images_vertically(
-    top_img: Image.Image, 
-    bottom_img: Image.Image,
-    output_path: str = None,
-    background_color: tuple = (255, 255, 255)
-) -> Image.Image:
-    width = max(top_img.width, bottom_img.width)
-    height = top_img.height + bottom_img.height
-    
-    combined = Image.new("RGB", (width, height), background_color)
-    
-    x_offset = (width - top_img.width) // 2
-    combined.paste(top_img, (x_offset, 0))
-    
-    x_offset = (width - bottom_img.width) // 2
-    combined.paste(bottom_img, (x_offset, top_img.height))
-    
-    if output_path:
-        combined.save(output_path)
-        return None
-    return combined
-
-
-def main(serial: str, links: List[str]) -> None:
-    device = Device(serial=serial)
-    parser = YoutubeAdParser(device=device)
-
-    for link in links:
-        parser.app.open_link(link)
-        time.sleep(0.2)
-        
-        is_loaded = parser.wait_load_video()
-        time.sleep(0.2)
-        
-        if is_loaded:
-            children = parser.content_watch_list_node.child()
-            if children.count == 0:
-                continue
-        time.sleep(2.25)
-        
-        count = 0
-        while count != 3:
-            if parser.stop_video():
-                break
-            count += 1
-            time.sleep(1.5)
-
-        time.sleep(0.2)
-
-        parser.preparing_app()
-        time.sleep(0.2)
-        
-        swipe_count = 0
-        while swipe_count != 8:
-            print(f"{swipe_count=}")
-            if parser.content_ad_block_node.exists:
-                swipe_count = 0
-                ad_block_coords = parser.content_ad_block_node.bounds()
-                watch_list_coords = parser.content_watch_list_node.bounds()
-                if ad_block_coords[3] == watch_list_coords[3]:
-                    parser.easy_swipe()
-                    continue
-                else:
-                    center_x = (ad_block_coords[2] + ad_block_coords[0]) // 2
-                    parser.device.swipe_points(
-                        points=[
-                            (center_x, ad_block_coords[3]),
-                            (center_x, watch_list_coords[3])
-                        ],
-                        duration=parser.down_swipe_duration
-                    )
-                    time.sleep(parser.time_sleep)
-                    
-                    view_count = parser.content_ad_block_node.child(**ClassNodesSelectors.view_group).count
-                    image_count = parser.content_ad_block_node.child(**ClassNodesSelectors.image_view).count
-
-                    print(f"{view_count} | {image_count}")
-                    if not (
-                        (view_count <= 2 and image_count <= 3) 
-                        or 
-                        (view_count == 8 and image_count == 5)
-                    ):
-                        result = parser.get_ad_coords()
-                        
-                        try:
-                            text = parser.get_ad_text(coords=result.text)
-                            print(f"{text=}")
-                            
-                            advertiser_info = parser.get_advertiser_info(coords=result.options)
-                            print(f"{advertiser_info=}")
-                            parser.content_watch_list_node.wait(timeout=2)
-                            
-                            ad_block_coords = parser.content_ad_block_node.bounds()
-                            watch_list_coords = parser.content_watch_list_node.bounds()
-                            text_block = parser.device.screenshot().crop(box=(
-                                watch_list_coords[0], result.image.bounds[3],
-                                watch_list_coords[2], ad_block_coords[3]
-                            ))
-                            
-                            url = parser.get_ad_url(coords=result.button)
-                            parser.content_watch_list_node.wait(timeout=2)
-                            print(f"{url=}")
-                            
-                            image_coords = parser._get_ad_image_coords()
-                            image_block = parser.device.screenshot().crop(box=image_coords.bounds)
-                            
-                            save_ad(serial=parser.device.serial, text=text, advertiser_info=advertiser_info, url=url, image_block=image_block, text_block=text_block)
-                        
-                        except Exception as e:
-                            print(e)
-                            while True:
-                                if parser.content_watch_list_node.exists:
-                                    break
-                                else:
-                                    parser.device.press("back")
-                                    time.sleep(1)
-                            
-                    parser.swipe()
-                    parser.swipe()
-                    swipe_count += 2
-                    
-                    time.sleep(parser.time_sleep)
-                    continue
-                
-            parser.swipe()
-            swipe_count += 1
-            time.sleep(parser.time_sleep)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Настройка параметров парсинга")
@@ -172,6 +20,7 @@ def parse_args():
     )
 
     return parser.parse_args()
+
 
 def get_adb_devices() -> None:
     """Получает список подключенных ADB устройств."""
@@ -203,6 +52,31 @@ def get_adb_devices() -> None:
         print(f"Произошла непредвиденная ошибка при получении устройств: {e}")
         return []
 
+
+def send_telegram_message(bot_token: str, chat_id: str, text: str) -> bool:
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        'chat_id': chat_id,
+        'text': text
+    }
+    
+    try:
+        response = requests.post(url, data=payload, timeout=10)
+        return response.status_code == 200
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка отправки: {e}")
+        return False
+
+
+def worker(serial: str, links: List[str]) -> None:
+    device = Device(serial)
+    parser = YoutubeParser(device=device)
+
+    try:
+        parser.run(links=links)
+    except Exception as e:
+        send_telegram_message(bot_token=parser.telegram_bot_api, chat_id=parser.telegram_chat_id, text=e)
+        raise e
 
 if __name__ == "__main__":
     args = parse_args()
@@ -244,7 +118,7 @@ if __name__ == "__main__":
 
             process = Process(
                 name=serial,
-                target=main,
+                target=worker,
                 args=(serial, links),
                 daemon=True
             )

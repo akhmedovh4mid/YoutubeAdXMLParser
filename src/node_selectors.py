@@ -1,5 +1,3 @@
-from typing import Dict, Any
-
 class MainNodesSelectors:
     main_node = {
         "className": "android.view.ViewGroup",
@@ -7,8 +5,7 @@ class MainNodesSelectors:
     }
     video_player_node = {
         "className": "android.widget.FrameLayout",
-        "resourceId": "com.google.android.youtube:id/watch_player",
-        "description": "Video player"
+        "resourceId": "com.google.android.youtube:id/watch_player"
     }
     time_bar_node = {
         "className": "android.view.ViewGroup",
@@ -85,32 +82,18 @@ class ChromeNodesSelectors:
         "className": "android.widget.TextView",
         "resourceId": "com.android.chrome:id/page_info_url"
     }
-
-
-class AdvertiserNodesSelectors:
-    content_node = {
+    
+    action_button = {
+        "className": "android.widget.LinearLayout",
+        "resourceId": "com.android.chrome:id/action_buttons"
+    }
+    content_preview_text = {
+        "className": "android.widget.TextView",
+        "resourceId": "android:id/content_preview_text"
+    }
+    tabcontent_node = {
         "className": "android.widget.FrameLayout",
-        "resourceId": "android:id/content"
-    }
-    progress_bar_node = {
-        "className": "android.widget.ProgressBar",
-        "resourceId": "com.google.android.youtube:id/load_progress"
-    }
-    advertiser_node = {
-        "className": "android.view.View",
-        "text": "About this advertiser"
-    }
-    advertiser_button = {
-        "className": "android.widget.Button",
-        "text": "About this advertiser"
-    }
-    advertiser_name_text = {
-        "className": "android.view.View",
-        "text": "Advertiser"
-    }
-    advertiser_location_text = {
-        "className": "android.view.View",
-        "text": "Location"
+        "resourceId": "android:id/tabcontent"
     }
 
 
