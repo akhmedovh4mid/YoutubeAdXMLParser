@@ -361,7 +361,7 @@ class YoutubeParser:
         print(f"[INFO] [{self.device.serial}] {view_count=} | {image_count=}")
         
         match (view_count, image_count):
-            case (8, 4) | (7, 4) | (8, 3):
+            case (8, 4) | (7, 4) | (8, 3) | (7, 3) | (18, 8) | (18, 7) | (18, 9) | (17, 8):
                 try:
                     ad_url = self.get_ad_url(point=ad_block_node_children[0].center())
                 except Exception as e:
