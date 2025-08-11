@@ -305,23 +305,6 @@ class YoutubeParser:
         return self.device.screenshot().crop(
             box=(left, top, right, bottom)
         )
-
-    # def get_ad_url(self, point: Tuple[int, int]) -> str:
-    #     self.device.click(*point)
-    #     time.sleep(self.ad_wait_timeout)
-        
-    #     self.chrome_nodes.menu_button.click(timeout=self.node_spawn_timeout)
-    #     self.chrome_nodes.page_info_button.click(timeout=self.node_spawn_timeout)
-    #     self.chrome_nodes.truncated_url_button.click(timeout=self.node_spawn_timeout)
-        
-    #     url = self.chrome_nodes.page_info_url_text.get_text(timeout=self.node_spawn_timeout)
-        
-    #     self.device.press("back")
-    #     time.sleep(self.action_timeout)
-    #     self.device.press("back")
-    #     time.sleep(self.action_timeout)
-        
-    #     return url
     
     def get_ad_url(self, point: Tuple[int, int]) -> str:
         self.device.click(*point)

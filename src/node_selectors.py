@@ -91,10 +91,6 @@ class ChromeNodesSelectors:
         "className": "android.widget.TextView",
         "resourceId": "android:id/content_preview_text"
     }
-    tabcontent_node = {
-        "className": "android.widget.FrameLayout",
-        "resourceId": "android:id/tabcontent"
-    }
 
 
 class ClassNodesSelectors:

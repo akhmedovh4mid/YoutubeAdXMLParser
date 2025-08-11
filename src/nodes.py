@@ -66,6 +66,5 @@ class ChromeNodes(BaseNode):
         self.truncated_url_button = self.device(**ChromeNodesSelectors.truncated_url_button)
         self.page_info_button = self.app_menu_list.child(**ChromeNodesSelectors.page_info_button)
         
-        self.tabcontent_node = self.device(**ChromeNodesSelectors.tabcontent_node)
         self.action_button = self.tool_bar_node.child(**ChromeNodesSelectors.action_button)
-        self.content_preview_text = self.tabcontent_node.child(**ChromeNodesSelectors.content_preview_text)
+        self.content_preview_text = self.device(**ChromeNodesSelectors.content_preview_text)
