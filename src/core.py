@@ -331,13 +331,6 @@ class YoutubeParser:
                 time.sleep(self.video_load_timeout)
 
     def parse_ad(self) -> AdInfo:
-        ad_block_node_children = self._get_children_nodes(node=self.content_nodes.ad_block_node)
-        ad_block_node_coords = self.content_nodes.ad_block_node.bounds()
-        ad_text = self.get_node_screenshot(
-            left=ad_block_node_coords[0], top=ad_block_node_children[0].bounds()[3],
-            right=ad_block_node_coords[2], bottom=ad_block_node_coords[3]
-        )
-        
         view_count = self.content_nodes.ad_block_node.child(**ClassNodesSelectors.view_group).count
         image_count = self.content_nodes.ad_block_node.child(**ClassNodesSelectors.image_view).count
         
@@ -345,12 +338,7 @@ class YoutubeParser:
         
         match (view_count, image_count):
             case (8, 4) | (7, 4) | (8, 3) | (7, 3) | (18, 8) | (18, 7) | (18, 9) | (17, 8):
-                try:
-                    ad_url = self.get_ad_url(point=ad_block_node_children[0].center())
-                except Exception as e:
-                    print(f"[ERROR] [{self.device.serial}] {e}")
-                    self.back_to_watch_list()
-                    return None
+                ...
             case (v, i) if (v <= 2 and i <= 3): 
                 return None
             case (8, 5):
@@ -358,13 +346,42 @@ class YoutubeParser:
             case _:
                 self.send_telegram_message()
                 return None
+        
+        ad_block_node_children = self._get_children_nodes(node=self.content_nodes.ad_block_node)
+        ad_block_node_coords = self.content_nodes.ad_block_node.bounds()
+        ad_text = self.get_node_screenshot(
+            left=ad_block_node_coords[0], top=ad_block_node_children[0].bounds()[3],
+            right=ad_block_node_coords[2], bottom=ad_block_node_coords[3]
+        )
+        
+        ad_block_image_coords = Coords(
+            bounds=ad_block_node_children[0].bounds(),
+            center=ad_block_node_children[0].center()
+        )
+        watch_list_coords = Coords(
+            bounds=self.content_nodes.watch_list_node.bounds(),
+            center=self.content_nodes.watch_list_node.center()
+        )
+        
+        self.reposition_content(
+            first_point=ad_block_image_coords.bounds[3], 
+            second_point=watch_list_coords.bounds[3]
+        )
+        time.sleep(self.action_timeout)
                 
         ad_block_node_children = self._get_children_nodes(node=self.content_nodes.ad_block_node)
         ad_image_block_coords = ad_block_node_children[0].bounds()
         ad_image = self.get_node_screenshot(*ad_image_block_coords)
         
-        image = self.combine_images_vertically(top_img=ad_image, bottom_img=ad_text)
+        try:
+            ad_url = self.get_ad_url(point=ad_block_node_children[0].center())
+        except Exception as e:
+            print(f"[ERROR] [{self.device.serial}] {e}")
+            self.back_to_watch_list()
+            return None
         
+        image = self.combine_images_vertically(top_img=ad_image, bottom_img=ad_text)
+
         return AdInfo(
             url=ad_url,
             image=image
@@ -481,9 +498,9 @@ class YoutubeParser:
                 continue
             print(f"[INFO] [{self.device.serial}] [{video_id}] Видео успешно подготовлено")
             time.sleep(self.action_timeout)
-            
-            swipe_count = 0   
-            while swipe_count != self.max_swipe_count:
+
+            swipe_count = 0
+            while swipe_count < self.max_swipe_count:
                 first_screenshot = self.device.screenshot()
                 
                 if self.content_nodes.ad_block_node.exists:
@@ -519,7 +536,7 @@ class YoutubeParser:
                         
                         second_screenshot = self.device.screenshot()
                         match_percentages = self.compare_images(first_screenshot, second_screenshot)
-                        if match_percentages >= 80:
+                        if match_percentages >= 70:
                             break
                         
                         swipe_count += 2
@@ -530,7 +547,7 @@ class YoutubeParser:
                 
                 second_screenshot = self.device.screenshot()
                 match_percentages = self.compare_images(first_screenshot, second_screenshot)
-                if match_percentages >= 80:
+                if match_percentages >= 70:
                     break
                 
                 swipe_count += 1
